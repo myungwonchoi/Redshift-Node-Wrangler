@@ -24,39 +24,686 @@ except ImportError as e:
     Image = None
     PIL_ERROR_MSG = str(e)
     print(f"Failed to import PIL: {e}")
-    print(f"Python Version: {sys.version}")
-    print(f"sys.path: {sys.path}")
-
 import redshift_utils
 
-PLUGIN_ID = 1067303  # Temporary ID, needs to be distinct
+PLUGIN_ID = 1067303
+
+ID_TREEVIEW = 1000
+ID_BTN_ORIGINAL = 1001
+ID_BTN_RESIZE = 1002
+ID_MENU_OPEN_TEX = 2001
+ID_MENU_DELETE_UNUSED = 2002
+
+class TextureObject(object):
+    """Stores data for a single row in the TreeView."""
+    def __init__(self, node, path, filename, resolution_str, size_str, is_selected=False):
+        self.node = node
+        self.path = path
+        self.filename = filename
+        self.resolution_str = resolution_str
+        self.size_str = size_str
+        self.selected = is_selected
+
+    @property
+    def IsSelected(self):
+        """Returns selection state"""
+        return self.selected
+
+    def Select(self):
+        """Select the item"""
+        self.selected = True
+
+    def Deselect(self):
+        """Deselect the item"""
+        self.selected = False
+
+    def __repr__(self):
+        return f"TextureObject({self.filename})"
+
+    def __str__(self):
+        return self.filename
+
+class TextureTreeViewFunctions(c4d.gui.TreeViewFunctions):
+    """Handles rendering and interaction for the TreeView."""
+
+    def __init__(self, texture_list):
+        self.texture_list = texture_list
+        # Color settings
+        self.color_item_normal = c4d.COLOR_TEXT
+        self.color_item_selected = c4d.COLOR_TEXT_SELECTED
+        self.color_background_normal = c4d.COLOR_BG_DARK2
+        self.color_background_alternate = c4d.COLOR_BG_DARK1
+        self.color_background_selected = c4d.COLOR_BG_HIGHLIGHT
+        
+        self.col_padding = 20
+        self.text_offset_x = 5
+
+    def SetTextureList(self, texture_list):
+        self.texture_list = texture_list
+
+    def GetFirst(self, root, userdata):
+        if not self.texture_list:
+            return None
+        return self.texture_list[0]
+
+    def GetDown(self, root, userdata, obj):
+        return None
+
+    def GetNext(self, root, userdata, obj):
+        try:
+            idx = self.texture_list.index(obj)
+            if idx < len(self.texture_list) - 1:
+                return self.texture_list[idx + 1]
+        except ValueError:
+            return None
+        return None
+
+    def GetPred(self, root, userdata, obj):
+        try:
+            idx = self.texture_list.index(obj)
+            if idx > 0:
+                return self.texture_list[idx - 1]
+        except ValueError:
+            return None
+        return None
+
+    def IsSelected(self, root, userdata, obj):
+        return obj.IsSelected
+
+    def Select(self, root, userdata, obj, mode):
+        # Update internal state and Graph Selection
+        
+        graph = None
+        if obj and obj.node.IsValid():
+            graph = obj.node.GetGraph()
+        elif self.texture_list:
+             # Try to find a valid node to get the graph
+             for t in self.texture_list:
+                 if t.node.IsValid():
+                     graph = t.node.GetGraph()
+                     break
+        
+        if not graph:
+             return
+
+        with graph.BeginTransaction() as transaction:
+            if mode == c4d.SELECTION_NEW:
+                # Deselect all in internal list
+                for t in self.texture_list:
+                    t.Deselect()
+                    if t.node.IsValid():
+                         maxon.GraphModelHelper.DeselectNode(t.node)
+                
+                # Select target
+                obj.Select()
+                if obj.node.IsValid():
+                    maxon.GraphModelHelper.SelectNode(obj.node)
+                    
+            elif mode == c4d.SELECTION_ADD:
+                obj.Select()
+                if obj.node.IsValid():
+                    maxon.GraphModelHelper.SelectNode(obj.node)
+                    
+            elif mode == c4d.SELECTION_SUB:
+                obj.Deselect()
+                if obj.node.IsValid():
+                    maxon.GraphModelHelper.DeselectNode(obj.node)
+            
+            transaction.Commit()
+        
+        # Trigger Event to update Node Editor
+        c4d.EventAdd()
+
+    def GetName(self, root, userdata, obj):
+        return str(obj)
+    
+    def SetName(self, root, userdata, obj, name):
+        pass
+
+    def GetId(self, root, userdata, obj):
+        return hash(obj)
+
+    def GetColumnWidth(self, root, userdata, obj, col, area):
+        if col == 1: # Filename
+            if obj:
+                 return area.DrawGetTextWidth(obj.filename) + self.col_padding
+            return 150
+        elif col == 2: # Resolution
+            if obj:
+                 return area.DrawGetTextWidth(obj.resolution_str) + self.col_padding
+            return 100
+        elif col == 3: # File Size
+            if obj:
+                 return area.DrawGetTextWidth(obj.size_str) + self.col_padding
+            return 80
+        return 100
+
+    def GetHeaderColumnWidth(self, root, userdata, col, area):
+         return self.GetColumnWidth(root, userdata, None, col, area)
+
+    def DrawCell(self, root, userdata, obj, col, drawinfo, bgColor):
+        if not obj: return
+        
+        canvas = drawinfo["frame"]
+        xpos = drawinfo["xpos"]
+        ypos = drawinfo["ypos"]
+        
+        text = ""
+        if col == 1:
+            text = obj.filename
+        elif col == 2:
+            text = obj.resolution_str
+        elif col == 3:
+            text = obj.size_str
+            
+        if obj.IsSelected:
+            txtColorDict = canvas.GetColorRGB(self.color_item_selected)
+        else:
+            txtColorDict = canvas.GetColorRGB(self.color_item_normal)
+            
+        txtColorVector = c4d.Vector(
+            txtColorDict["r"] / 255.0,
+            txtColorDict["g"] / 255.0,
+            txtColorDict["b"] / 255.0
+        )
+        
+        canvas.DrawSetTextCol(txtColorVector, bgColor)
+        canvas.DrawText(text, xpos + self.text_offset_x, ypos + 2)
+
+    def GetLineHeight(self, root, userdata, obj, col, area):
+        return 18 
+
+    def IsResizeColAllowed(self, root, userdata, lColID):
+        return True
+
+    def IsTristate(self, root, userdata):
+        return False
+
+    def IsOpened(self, root, userdata, obj):
+        return False
+
+    def Open(self, root, userdata, obj, onoff):
+        pass
+
+    def GetDragType(self, root, userdata, obj):
+        return c4d.NOTOK
+
+    def DragStart(self, root, userdata, obj):
+        return c4d.NOTOK
+
+    def AcceptDragObject(self, root, userdata, obj, dragtype, dragobject):
+        return c4d.INSERT_NONE
+
+    def InsertObject(self, root, userdata, obj, dragtype, dragobject, insertmode, bCopy):
+        pass
+
+    def DoubleClick(self, root, userdata, obj, col, mouseinfo):
+        return False
+
+    def DeletePressed(self, root, userdata):
+        pass
+
+    def GetBackgroundColor(self, root, userdata, obj, line, col):
+        if not obj: return None
+        if obj.IsSelected:
+            return self.color_background_selected
+        return None
+
+class ResizeTextureDialog(c4d.gui.GeDialog):
+    """Main Dialog for the plugin."""
+
+    def __init__(self):
+        self.treegui = None
+        self.texture_list = []
+        self.tree_funcs = TextureTreeViewFunctions([]) # Initialize with empty list
+
+    def CreateLayout(self):
+        self.SetTitle("Resize Texture Resolution")
+        
+        # Menu
+        self.MenuFlushAll()
+        self.MenuSubBegin("Options")
+        self.MenuAddString(ID_MENU_OPEN_TEX, "Open tex Folder...")
+        self.MenuAddString(ID_MENU_DELETE_UNUSED, "Delete Unused Textures(Selected Only)")
+        self.MenuSubEnd()
+        self.MenuFinished()
+
+        # TreeView
+        settings = c4d.BaseContainer()
+        settings.SetBool(c4d.TREEVIEW_BORDER, True)
+        settings.SetBool(c4d.TREEVIEW_HAS_HEADER, True)
+        settings.SetBool(c4d.TREEVIEW_HIDE_LINES, False)
+        settings.SetBool(c4d.TREEVIEW_MOVE_COLUMN, True)
+        settings.SetBool(c4d.TREEVIEW_RESIZE_HEADER, True)
+        settings.SetBool(c4d.TREEVIEW_FIXED_LAYOUT, True)
+        settings.SetBool(c4d.TREEVIEW_ALTERNATE_BG, True)
+        settings.SetBool(c4d.TREEVIEW_NOENTERRENAME, True)
+        settings.SetBool(c4d.TREEVIEW_NO_DELETE, True)
+        settings.SetBool(c4d.TREEVIEW_NO_BACK_DELETE, True)
+
+        self.treegui = self.AddCustomGui(ID_TREEVIEW, c4d.CUSTOMGUI_TREEVIEW, "", c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 0, 0, settings)
+
+        # Buttons
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 2, 0, "", 0)
+        self.GroupBorderSpace(5, 5, 5, 5) # Added Border Space
+        self.AddButton(ID_BTN_ORIGINAL, c4d.BFH_SCALEFIT, 0, 0, "Original")
+        self.AddButton(ID_BTN_RESIZE, c4d.BFH_SCALEFIT, 0, 0, "Resize to 50%")
+        self.GroupEnd()
+
+        if self.treegui:
+            # Set Root ONCE. Use self.treegui as a dummy root object.
+            # The Functions.GetFirst will simply return the first item from the list, ignoring the root argument.
+            self.treegui.SetRoot(self.treegui, self.tree_funcs, None)
+
+        return True
+
+    def InitValues(self):
+        # Setup Columns
+        layout = c4d.BaseContainer()
+        
+        # Column IDs
+        COL_FILENAME = 1
+        COL_RESOLUTION = 2
+        COL_SIZE = 3
+        
+        # Column 1: Filename
+        layout.SetLong(COL_FILENAME, c4d.LV_USER)
+        
+        # Column 2: Resolution
+        layout.SetLong(COL_RESOLUTION, c4d.LV_USER)
+
+        # Column 3: File Size
+        layout.SetLong(COL_SIZE, c4d.LV_USER)
+        
+        self.treegui.SetLayout(3, layout)
+        
+        # Explicitly set headers (redundant but safe)
+        self.treegui.SetHeaderText(COL_FILENAME, "Filename")
+        self.treegui.SetHeaderText(COL_RESOLUTION, "Resolution")
+        self.treegui.SetHeaderText(COL_SIZE, "File Size")
+        
+        # Refresh Data
+        self.RefreshTextureList()
+        return True
+
+    def CoreMessage(self, id, msg):
+        if id == c4d.EVMSG_CHANGE:
+            self.RefreshTextureList()
+        return c4d.gui.GeDialog.CoreMessage(self, id, msg)
+
+    def RefreshTextureList(self):
+        doc = c4d.documents.GetActiveDocument()
+        if not doc: return
+
+        # Get Materials
+        mat = doc.GetActiveMaterials()[0]
+        nodes_found = []
+        
+        if mat:
+            nodeMaterial = mat.GetNodeMaterialReference()
+            if nodeMaterial.HasSpace(redshift_utils.ID_RS_NODESPACE):
+                graph = nodeMaterial.GetGraph(redshift_utils.ID_RS_NODESPACE)
+                if not graph.IsNullValue():
+                    # 1. Collect ALL Texture Nodes
+                    root = graph.GetViewRoot()
+                    children = []
+                    root.GetChildren(children, maxon.NODE_KIND.NODE)
+                    
+                    all_texture_nodes = []
+                    for node in children:
+                        if not node.IsValid(): continue
+                        # Check Asset ID
+                        # Some nodes might not have assetid attribute? 
+                        # Try/Except or Check
+                        try:
+                            asset_id = node.GetValue("net.maxon.node.attribute.assetid")[0]
+                            if asset_id == redshift_utils.ID_RS_TEXTURESAMPLER:
+                                all_texture_nodes.append(node)
+                        except:
+                            pass
+
+                    # 2. Identify Selected Nodes (to mark them in TreeView)
+                    selected_nodes_list = []
+                    maxon.GraphModelHelper.GetSelectedNodes(graph, maxon.NODE_KIND.NODE, lambda node: selected_nodes_list.append(node) or True)
+                    # Convert to unique IDs or verify by equality?
+                    # Maxon GraphNodes are objects, equality logic should work for same graph instances.
+                    
+                    nodes_found = all_texture_nodes
+
+        # Build Texture Objects
+        new_list = []
+        for node in nodes_found:
+            # Check if this node is in selected_nodes_list
+            # Equality check for GraphNode
+            is_selected = False
+            for sel_node in selected_nodes_list:
+                if sel_node == node:
+                    is_selected = True
+                    break
+
+            path_port = node.GetInputs().FindChild(redshift_utils.PORT_RS_TEX_PATH).FindChild("path")
+            current_path = ""
+            if path_port.IsValid():
+                val = path_port.GetPortValue()
+                if val:
+                    current_path = str(val) if not isinstance(val, maxon.Url) else val.GetSystemPath()
+            
+            # Resolve absolute path for resolution info
+            abs_path = current_path
+            doc_path = doc.GetDocumentPath()
+            if not os.path.isabs(current_path):
+                 # Try relative paths
+                 if doc_path:
+                     cand1 = os.path.join(doc_path, current_path)
+                     cand2 = os.path.join(doc_path, "tex", current_path)
+                     if os.path.exists(cand1):
+                         abs_path = cand1
+                     elif os.path.exists(cand2):
+                         abs_path = cand2
+            
+            # Default values
+            # Default values
+            filename = os.path.basename(current_path) if current_path else "No Path"
+            res_str = "Unknown"
+            size_str = "Unknown"
+
+            # Load validation info if file exists
+            if abs_path and os.path.exists(abs_path):
+                # Calculate file size
+                try:
+                    size_bytes = os.path.getsize(abs_path)
+                    size_mb = size_bytes / (1024 * 1024)
+                    size_str = f"{size_mb:.2f} MB"
+                except Exception as e:
+                    print(f"Error getting file size for {filename}: {e}")
+                    size_str = "Error"
+
+                if Image:
+                    try:
+                        with Image.open(abs_path) as img:
+                            res_str = f"{img.width}x{img.height}"
+                    except Exception as e:
+                        print(f"Error reading texture info for {filename}: {e}")
+                else:
+                    res_str = "PIL Missing"
+            
+            new_list.append(TextureObject(node, current_path, filename, res_str, size_str, is_selected))
+
+        # Update data in existing functions object
+        self.texture_list = new_list
+        self.tree_funcs.SetTextureList(self.texture_list)
+        self.treegui.Refresh()
+
+    def Command(self, id, msg):
+        if id == ID_BTN_RESIZE:
+            self.ResizeTo50percent()
+        elif id == ID_BTN_ORIGINAL:
+            self.Original()
+        elif id == ID_MENU_OPEN_TEX:
+            self.OpenTexFolder()
+        elif id == ID_MENU_DELETE_UNUSED:
+            self.DeleteUnusedResizedTextures()
+        return True
+
+    def ResizeTo50percent(self):
+        doc = c4d.documents.GetActiveDocument()
+        doc_path = doc.GetDocumentPath() # Re-fetch to be safe
+        tex_folder = os.path.join(doc_path, "tex") if doc_path else "" # Warning if no doc path?
+        
+        if not doc_path:
+             c4d.gui.MessageDialog("Please save project first.")
+             return
+
+        if not os.path.exists(tex_folder):
+            try:
+                os.makedirs(tex_folder)
+            except:
+                pass
+
+        selected_objs = [obj for obj in self.texture_list if obj.selected]
+        if not selected_objs:
+             # If nothing selected, process ALL
+             selected_objs = self.texture_list
+
+        if not selected_objs:
+             c4d.gui.MessageDialog("No textures to resize.")
+             return
+
+        processed = 0
+        
+        # Import reuse function
+        # Or define it here as static/method
+        # We'll use the one from before but adapted
+        
+        for obj in selected_objs:
+             # Logic from previous script
+             # 1. Get current absolute path
+             current_path = obj.path
+             # Resolve absolute again...
+             abs_path = current_path
+             if not os.path.isabs(current_path):
+                 cand = os.path.join(doc_path, current_path)
+                 if os.path.exists(cand): abs_path = cand
+                 else:
+                     cand = os.path.join(doc_path, "tex", current_path)
+                     if os.path.exists(cand): abs_path = cand
+
+             if not abs_path or not os.path.exists(abs_path):
+                 print(f"File not found: {current_path}")
+                 continue
+
+             filename = os.path.basename(current_path)
+             name, ext = os.path.splitext(filename)
+             
+             # Prevent re-resizing if already low?
+             # User logic: "Resize to 50%". If already low, it will become smaller.
+             # But usually we check suffix.
+             # User script logic didn't check input name, just appended _Low.
+             # Let's ensure we validly append _Low.
+             
+             # If it already ends in _Low, do we add another?
+             # "texture_Low_Low.jpg" ?
+             # Let's assume yes, or clean it. 
+             # Let's just append _Low as requested.
+             
+             new_filename = f"{name}_Low{ext}"
+             target_path = os.path.join(tex_folder, new_filename)
+             
+             # Copy original to tex folder if it's not already there
+             # This ensures we have a backup/local copy of the original
+             original_in_tex = os.path.join(tex_folder, filename)
+             if os.path.abspath(abs_path) != os.path.abspath(original_in_tex):
+                 if not os.path.exists(original_in_tex):
+                     try:
+                         shutil.copy2(abs_path, original_in_tex)
+                         print(f"Copied original to: {original_in_tex}")
+                     except Exception as e:
+                         print(f"Failed to copy original: {e}")
+
+             try:
+                 resize_and_strip_metadata(abs_path, target_path)
+                 
+                 # Set Port
+                 # Need graph transaction? Ideally yes.
+                 # But we have the node.
+                 # Let's wrap in transaction if possible, or just SetValue (Model interface)
+                 # Get Inputs returns a GraphNode, we can set value.
+                 
+                 # We need the graph to start a transaction.
+                 # Let's assume we can get it from the node or pass it.
+                 # Accessing graph from node:
+                 graph = obj.node.GetGraph()
+                 with graph.BeginTransaction() as t:
+                     path_port = obj.node.GetInputs().FindChild(redshift_utils.PORT_RS_TEX_PATH).FindChild("path")
+                     path_port.SetPortValue(target_path)
+                     t.Commit()
+                 
+                 processed += 1
+             except Exception as e:
+                 print(f"Failed to resize {filename}: {e}")
+
+        if processed > 0:
+            self.RefreshTextureList()
+            c4d.EventAdd()
+
+    def Original(self):
+        # "Original 버튼을 누르면 만약 텍스쳐 이름이 _Low로 끝나는지 확인하고, 
+        # 그렇다면 _Low를 지운 경로를 tex0에 적용해서 원래 텍스쳐에 연결되도록 해."
+        
+        selected_objs = [obj for obj in self.texture_list if obj.selected]
+        if not selected_objs:
+             # If nothing selected, process ALL
+             selected_objs = self.texture_list
+             
+        processed = 0
+        
+        for obj in selected_objs:
+            current_path = obj.path
+            filename = os.path.basename(current_path)
+            name, ext = os.path.splitext(filename)
+            
+            if name.endswith("_Low"):
+                # Remove all trailing _Low
+                base_name = name
+                while base_name.endswith("_Low"):
+                    base_name = base_name[:-4]
+                
+                original_name = base_name + ext
+                # We need to find where this original file is.
+                # Assuming it is in 'tex' folder or same folder?
+                # "원래 텍스쳐에 연결되도록 해" -> Just change the path string?
+                # We should probably check if it exists in the same directory.
+                
+                dir_path = os.path.dirname(current_path)
+                # If path was just filename, dir_path is empty.
+                
+                if not dir_path:
+                    # It was likely in tex folder or next to doc
+                    # Let's assume same directory as the _Low file
+                    pass
+                    
+                new_path_str = os.path.join(dir_path, original_name)
+                
+                graph = obj.node.GetGraph()
+                with graph.BeginTransaction() as t:
+                     path_port = obj.node.GetInputs().FindChild(redshift_utils.PORT_RS_TEX_PATH).FindChild("path")
+                     path_port.SetPortValue(new_path_str)
+                     t.Commit()
+                processed += 1
+
+        if processed > 0:
+            self.RefreshTextureList()
+            c4d.EventAdd()
+
+    def OpenTexFolder(self):
+        doc = c4d.documents.GetActiveDocument()
+        if not doc: return
+        doc_path = doc.GetDocumentPath()
+        if not doc_path: return
+        
+        tex_folder = os.path.join(doc_path, "tex")
+        if not os.path.exists(tex_folder):
+            # Fallback to doc path if tex doesn't exist
+            tex_folder = doc_path
+
+        # Use os.startfile on Windows to open the folder content itself
+        if sys.platform == 'win32':
+            try:
+                os.startfile(tex_folder)
+            except Exception as e:
+                print(f"Failed to open folder: {e}")
+                c4d.storage.ShowInFinder(tex_folder)
+        else:
+            c4d.storage.ShowInFinder(tex_folder)
+
+
+    def DeleteUnusedResizedTextures(self):
+        import re
+        
+        doc = c4d.documents.GetActiveDocument()
+        doc_path = doc.GetDocumentPath()
+        
+        selected_objs = [obj for obj in self.texture_list if obj.selected]
+        if not selected_objs:
+             c4d.gui.MessageDialog("No textures selected.")
+             return
+             
+        # Confirm dialog
+        if not c4d.gui.QuestionDialog("Delete unused intermediate '_Low' textures for selected items?\nThis cannot be undone."):
+            return
+
+        deleted_files = []
+        
+        for obj in selected_objs:
+            current_path = obj.path
+            if not current_path: continue
+            
+            # Resolve absolute path
+            abs_path = current_path
+            if not os.path.isabs(current_path) and doc_path:
+                 cand1 = os.path.join(doc_path, current_path)
+                 cand2 = os.path.join(doc_path, "tex", current_path)
+                 if os.path.exists(cand1):
+                     abs_path = cand1
+                 elif os.path.exists(cand2):
+                     abs_path = cand2
+            
+            # Need a valid directory path
+            if not os.path.exists(abs_path):
+                continue
+                
+            dir_path = os.path.dirname(abs_path)
+            filename = os.path.basename(abs_path)
+            name, ext = os.path.splitext(filename)
+            
+            # 1. Identify Base Name (Original Name)
+            base_name = name
+            while base_name.endswith("_Low"):
+                base_name = base_name[:-4]
+            
+            # 2. Scan directory
+            try:
+                files = os.listdir(dir_path)
+            except Exception as e:
+                print(f"Failed to list directory {dir_path}: {e}")
+                continue
+                
+            # Regex pattern: base_name + at least one "_Low" + ext
+            pattern_str = f"^{re.escape(base_name)}(_Low)+{re.escape(ext)}$"
+            pattern = re.compile(pattern_str, re.IGNORECASE)
+            
+            for f in files:
+                if pattern.match(f):
+                    full_path = os.path.join(dir_path, f)
+                    
+                    # Verify it's not the currently used file
+                    if os.path.abspath(full_path).lower() != os.path.abspath(abs_path).lower():
+                        try:
+                            os.remove(full_path)
+                            print(f"Deleted unused: {f}")
+                            deleted_files.append(f)
+                        except Exception as e:
+                            print(f"Failed to delete {f}: {e}")
+        
+        if len(deleted_files) > 0:
+            msg = f"Deleted {len(deleted_files)} unused files:\n\n"
+            msg += "\n".join(deleted_files)
+            c4d.gui.MessageDialog(msg)
+        else:
+            c4d.gui.MessageDialog("No unused resized textures found to delete.")
+
 
 def resize_and_strip_metadata(input_path, output_path):
     if not Image:
-        raise ImportError(f"PIL library is not available. Error: {PIL_ERROR_MSG}")
+        raise ImportError("PIL not loaded")
     
     with Image.open(input_path) as img:
-        # 1. Resize to 50%
         new_size = (img.width // 2, img.height // 2)
         resized_img = img.resize(new_size, Image.Resampling.LANCZOS)
         
-        # 2. Strip metadata by creating a new image
-        # Using the same mode to preserve channels (e.g. RGBA)
+        # Strip metadata
         clean_img = Image.new(resized_img.mode, resized_img.size)
         clean_img.putdata(list(resized_img.getdata()))
-        
-        # 3. Save optimized
-        # Determine format from extension or default to JPEG if original common formats
-        # However, user example used "JPEG" explicitly. 
-        # But we should respect original format if possible (ex: png, tif).
-        # For this request, I'll follow user snippet's save style but adapt format.
-        
-        fmt = img.format if img.format else "JPEG"
-        
-        # Some formats don't support optimize/quality args the same way (e.g. PNG)
-        # We will try simpler save first or specific logic.
-        # User snippet: clean_img.save(output_path, "JPEG", optimize=True, quality=85)
-        # I will infer format from extension for robustness.
         
         ext = os.path.splitext(output_path)[1].lower()
         if ext in ['.jpg', '.jpeg']:
@@ -69,188 +716,28 @@ def resize_and_strip_metadata(input_path, output_path):
              clean_img.save(output_path)
 
 
-def validate_selection(doc):
-    # Reuse validation logic
-    c4d.CallCommand(465002328) # Ensure Node Editor is open (optional but good context)
-    mat = doc.GetActiveMaterial()
-    if not mat:
-        c4d.gui.MessageDialog("Please select a Redshift Node Material.")
-        return None, None
-
-    nodeMaterial = mat.GetNodeMaterialReference()
-    if not nodeMaterial.HasSpace(redshift_utils.ID_RS_NODESPACE):
-        c4d.gui.MessageDialog("Selected material is not a Redshift Node Material.")
-        return None, None
-
-    graph = nodeMaterial.GetGraph(redshift_utils.ID_RS_NODESPACE)
-    if graph.IsNullValue():
-        return None, None
-
-    selected_nodes = []
-    maxon.GraphModelHelper.GetSelectedNodes(graph, maxon.NODE_KIND.NODE, lambda node: selected_nodes.append(node) or True)
-
-    texture_nodes = []
-    for node in selected_nodes:
-        if not node.IsValid(): continue
-        asset_id = node.GetValue("net.maxon.node.attribute.assetid")[0]
-        if asset_id == redshift_utils.ID_RS_TEXTURESAMPLER:
-            texture_nodes.append(node)
-
-    if not texture_nodes:
-        c4d.gui.MessageDialog("Please select at least one Texture node.")
-        return None, None
-
-    return graph, texture_nodes
-
 class ResizeTextureCommand(c4d.plugins.CommandData):
+    dialog = None
+
     def Execute(self, doc):
-        # 0. Check PIL availability
-        if not Image:
-            c4d.gui.MessageDialog(f"PIL library failed to load.\n\nError: {PIL_ERROR_MSG}\n\nNote: Check if 'utils/PIL' is compatible with C4D's Python version.")
-            return True
-
-        # 1. Check Document Save State
-        doc_path = doc.GetDocumentPath()
-        if not doc_path:
-            c4d.gui.MessageDialog("Please save the project first.")
-            return True
-
-        # 2. Validate Selection
-        graph, texture_nodes = validate_selection(doc)
-        if not graph:
-            return True
-
-        # 3. Prepare Texture Directory
-        tex_folder = os.path.join(doc_path, "tex")
-        if not os.path.exists(tex_folder):
-            try:
-                os.makedirs(tex_folder)
-            except OSError as e:
-                c4d.gui.MessageDialog(f"Failed to create 'tex' folder: {e}")
-                return True
-
-        processed_count = 0
-        success_list = []
-        fail_list = []
+        if self.dialog is None:
+            self.dialog = ResizeTextureDialog()
         
-        with graph.BeginTransaction() as transaction:
-            for node in texture_nodes:
-                # Get current path
-                path_port = node.GetInputs().FindChild(redshift_utils.PORT_RS_TEX_PATH).FindChild("path")
-                if not path_port.IsValid():
-                    continue
-                
-                current_path_val = path_port.GetPortValue()
-                if current_path_val is None:
-                    continue
-                
-                current_path = str(current_path_val)
-                if isinstance(current_path_val, maxon.Url):
-                    current_path = current_path_val.GetSystemPath()
-                
-                # 텍스처 파일 존재 여부 확인 및 경로 보정
-                if not current_path or not os.path.isfile(current_path):
-                    path_found = False
-                    # 1. doc_path + current_path
-                    if doc_path and current_path:
-                        cand1 = os.path.join(doc_path, current_path)
-                        if os.path.exists(cand1) and os.path.isfile(cand1):
-                            current_path = cand1
-                            path_found = True
-                    
-                    # 2. doc_path + "tex" + current_path
-                    if not path_found and doc_path and current_path:
-                        cand2 = os.path.join(doc_path, "tex", current_path)
-                        if os.path.exists(cand2) and os.path.isfile(cand2):
-                            current_path = cand2
-                            path_found = True
-                            
-                    if not path_found:
-                        print(f"    텍스처 파일이 존재하지 않거나 파일이 아닙니다: {current_path}")
-                        fail_list.append(os.path.basename(current_path) if current_path else "Unknown Path")
-                        continue
+        # Open NON-Modally
+        return self.dialog.Open(dlgtype=c4d.DLG_TYPE_ASYNC, pluginid=PLUGIN_ID, defaultw=500, defaulth=300)
 
-                # Prepare Target Path
-                filename = os.path.basename(current_path)
-                tex_folder_file = os.path.join(tex_folder, filename)
-
-                # Copy original if it doesn't exist in tex folder
-                # We check abspath to avoid copying if source is already the destination
-                if not os.path.exists(tex_folder_file) or os.path.abspath(current_path) != os.path.abspath(tex_folder_file):
-                    if not os.path.exists(tex_folder_file):
-                        try:
-                            shutil.copy2(current_path, tex_folder_file)
-                            print(f"Copied original to: {tex_folder_file}")
-                        except Exception as e:
-                            print(f"Failed to copy original: {e}")
-
-                # Use the local file as source for resizing if available
-                source_path = tex_folder_file if os.path.exists(tex_folder_file) else current_path
-                
-                name, ext = os.path.splitext(filename)
-                
-                # Verify if already low res to avoid double shrinking? 
-                # User asked to append "_Low".
-                new_filename = f"{name}_Low{ext}"
-                target_path = os.path.join(tex_folder, new_filename)
-
-                # Resize Logic
-                try:
-                    should_resize = True
-                    if os.path.exists(target_path):
-                        # File exists, ask user to overwrite
-                        # Note: This might be annoying if many files exist, but fulfills the specific request.
-                        if c4d.gui.QuestionDialog(f"File '{new_filename}' already exists.\nOverwrite?"):
-                             print(f"Overwriting: {new_filename}")
-                             should_resize = True
-                        else:
-                             print(f"Using existing file: {new_filename}")
-                             should_resize = False
-                    
-                    if should_resize:
-                        if not os.path.exists(target_path) or should_resize: # Check again or just do it
-                             print(f"Resizing: {filename} -> {new_filename}")
-                             resize_and_strip_metadata(source_path, target_path)
-                    
-                    # Update Node Path
-                    path_port.SetPortValue(target_path)
-                    processed_count += 1
-                    success_list.append(new_filename)
-                    
-                except Exception as e:
-                    print(f"Error processing {filename}: {e}")
-                    fail_list.append(filename)
-                    # Continue to next node even if one fails
-        
-            transaction.Commit()
-        
-        msg = ""
-        if processed_count > 0:
-            c4d.EventAdd()
-            msg += f"Successfully resized/updated {processed_count} textures.\n\n"
-        else:
-            msg += "No textures were resized.\n\n"
-
-        if success_list:
-            msg += "[Changed Textures]\n" + "\n".join(success_list) + "\n\n"
-        
-        if fail_list:
-             msg += "[Failed/Unchanged Textures]\n" + "\n".join(fail_list)
-             
-        c4d.gui.MessageDialog(msg)
-
-        return True
+    def RestoreLayout(self, sec_ref):
+        if self.dialog is None:
+            self.dialog = ResizeTextureDialog()
+        return self.dialog.Restore(PLUGIN_ID, sec_ref)
 
 if __name__ == "__main__":
-    # Icon handling (reuses existing icon logic pattern, though we don't have a specific icon for this yet)
-    # Using None for now or we could copy one.
     bmp = None
-
     c4d.plugins.RegisterCommandPlugin(
         id=PLUGIN_ID,
         str="Resize Texture Resolution...",
         info=0,
         icon=bmp,
-        help="Reduces resolution of selected texture nodes images by 50%.",
+        help="Manage texture resolutions",
         dat=ResizeTextureCommand()
     )
