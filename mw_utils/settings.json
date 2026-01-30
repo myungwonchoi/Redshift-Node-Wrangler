@@ -1,9 +1,9 @@
 {
     "QuickTextureTransform": {
         "uv_projection": false,
-        "scale": false,
+        "scale": true,
         "offset": false,
-        "rotation": true,
+        "rotation": false,
         "triplanar": false,
         "scale_type_vector": false,
         "per_texture": false
